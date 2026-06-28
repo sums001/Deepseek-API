@@ -14,6 +14,9 @@ class ChatMessage(BaseModel):
     # content is a plain string, or a list of parts (OpenAI vision-style). We only
     # read text parts; non-text parts are ignored.
     content: Union[str, List[dict], None] = None
+    name: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[List[dict]] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -26,6 +29,9 @@ class ChatCompletionRequest(BaseModel):
     # pass these via extra_body: `thinking` (DeepThink), `search` (web).
     thinking: bool = False
     search: bool = False
+    # Native OpenAI function calling support (emulated in server)
+    tools: Optional[List[dict]] = None
+    tool_choice: Optional[Union[str, dict]] = None
     # Accepted for compatibility but not all are forwarded to DeepSeek.
     temperature: Optional[float] = None
     top_p: Optional[float] = None

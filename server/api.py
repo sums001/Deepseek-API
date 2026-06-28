@@ -21,8 +21,11 @@ RATE_LIMIT_PER_MINUTE); /healthz is exempt.
 
 from __future__ import annotations
 
+import json
+import re
 import threading
 import time
+import uuid
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -112,7 +115,7 @@ async def chat_completions(req: ChatCompletionRequest):
     # A thread's model is fixed when it's created, so on resume we ignore `model`
     # (the OpenAI SDK always sends one) and let the existing thread's model stand.
     model_type = None if req.conversation_id else resolve_model_type(base_model)
-    prompt = messages_to_prompt(req.messages)
+    prompt = messages_to_prompt(req.messages, tools=req.tools)
 
     try:
         # Off the event loop: get_client() uses Playwright's sync API, which
@@ -141,4 +144,40 @@ async def chat_completions(req: ChatCompletionRequest):
     except Exception as e:
         return _error(f"DeepSeek request failed: {e}")
 
-    return completion_response(req.model, reply.text, prompt, reply.conversation_id)
+    # Check if the model decided to make a tool call
+    tool_calls = None
+    finish_reason = "stop"
+
+    if req.tools:
+        # Extract the outermost JSON object by finding the first '{' and last '}'
+        start = reply.text.find("{")
+        end = reply.text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                data = json.loads(reply.text[start:end+1])
+                if "tool_calls" in data and isinstance(data["tool_calls"], list):
+                    tool_calls = []
+                    for raw_tc in data["tool_calls"]:
+                        args = raw_tc.get("arguments", {})
+                        if isinstance(args, dict):
+                            args_str = json.dumps(args)
+                        else:
+                            args_str = str(args)
+                        
+                        tc = {
+                            "id": "call_" + uuid.uuid4().hex[:8],
+                            "type": "function",
+                            "function": {
+                                "name": raw_tc.get("name"),
+                                "arguments": args_str
+                            }
+                        }
+                        tool_calls.append(tc)
+                    finish_reason = "tool_calls"
+            except Exception:
+                pass
+
+    return completion_response(
+        req.model, reply.text, prompt, reply.conversation_id,
+        tool_calls=tool_calls, finish_reason=finish_reason
+    )
