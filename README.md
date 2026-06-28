@@ -23,6 +23,7 @@ You sign in once in a browser with your DeepSeek account; your session is saved 
 - [Command line](#command-line)
 - [Human-check & proof-of-work (automatic)](#human-check--proof-of-work-automatic)
 - [Models, DeepThink & web search](#models-deepthink--web-search)
+- [Tool / Function Calling (Emulated)](#tool--function-calling-emulated)
 - [Concurrency](#concurrency)
 - [Rate limiting](#rate-limiting)
 - [Project layout](#project-layout)
@@ -250,6 +251,44 @@ on resume. Unknown model names return a `404` (no silent fallback). See
 
 ---
 
+## Tool / Function Calling (Emulated)
+
+The server supports emulated OpenAI-style **Tool/Function Calling**. Since the web version of DeepSeek does not natively support tool registration via the API, the proxy handles this transparently:
+
+1. **System Instruction Injection:** When you pass a `tools` list in the OpenAI request, the proxy formats their descriptions and parameters, appending them as a system instruction at the start of the prompt.
+2. **JSON Parsing:** If the model outputs a JSON block requesting a tool call, the proxy intercepts the response, extracts the call, and maps it back into the standard OpenAI `tool_calls` structure.
+
+This allows any OpenAI-compatible client (including LangChain, n8n, etc.) to trigger local tools automatically.
+
+Example using the OpenAI SDK:
+
+```python
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dolar_rate",
+            "description": "Get the current USD to VEF exchange rate.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    }
+]
+
+resp = client.chat.completions.create(
+    model="deepseek-chat",
+    messages=[{"role": "user", "content": "What is the current dollar rate?"}],
+    tools=tools
+)
+
+# If the model requested the tool:
+message = resp.choices[0].message
+if message.tool_calls:
+    for tc in message.tool_calls:
+        print(f"Tool request: {tc.function.name} with args {tc.function.arguments}")
+```
+
+---
+
 ## Concurrency
 
 The server bridges a **single** signed-in DeepSeek account behind one shared
@@ -299,7 +338,7 @@ yourself.
 - **Sign in once, then reuse.** The cached session refreshes automatically; you only re-sign-in if it fully expires.
 - **Be reasonable.** Please use it in moderation, and don't spam or hammer it with automated bulk requests.
 - **No real token counts.** `usage` in responses is a rough ~4-chars/token estimate.
-- **Most OpenAI params are accepted but ignored** (`temperature`, `top_p`, `max_tokens`); only `model`, `messages`, `stream`, `conversation_id`, `thinking`, and `search` do anything.
+- **Most OpenAI params are accepted but ignored** (`temperature`, `top_p`, `max_tokens`); only `model`, `messages`, `stream`, `conversation_id`, `thinking`, `search`, and `tools` do anything.
 - **Vision is deferred.** It needs image-upload plumbing that isn't built yet.
 - **Your session is private.** Everything in `session/` (cookies + token) stays on your machine and is git-ignored.
 

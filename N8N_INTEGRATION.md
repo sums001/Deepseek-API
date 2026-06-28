@@ -41,6 +41,22 @@ Puedes seleccionar o escribir los siguientes nombres de modelos en n8n:
 
 ---
 
+## Soporte de Herramientas (Tool/Function Calling)
+
+El proxy soporta la ejecución de herramientas (**Tool/Function Calling**) desde n8n de forma nativa. 
+
+Cuando conectas herramientas (por ejemplo, nodos de *Wikipedia*, *Google Search*, o *Custom HTTP Requests*) a tu nodo de **AI Agent** en n8n, n8n enviará las definiciones de estas herramientas al proxy bajo el parámetro `tools`.
+
+El proxy emula esta funcionalidad automáticamente:
+1. Convierte las definiciones de tus herramientas de n8n en una **instrucción de sistema** estructurada que le indica a DeepSeek cómo y cuándo responder en un formato JSON específico.
+2. Si DeepSeek decide usar una herramienta, responde con dicho JSON.
+3. El proxy intercepta esa respuesta, la convierte en un evento `tool_calls` estándar de OpenAI, y se la devuelve a n8n.
+4. n8n ejecuta la herramienta localmente y envía de vuelta el resultado al proxy para que el agente termine de responder.
+
+Esto funciona de manera completamente transparente y te permite crear agentes autónomos complejos en n8n usando este proxy.
+
+---
+
 ## Comportamiento del Servidor y Compatibilidad
 
 *   **Fallback automático:** Si n8n (o cualquier otra herramienta) envía un modelo que no se encuentra en la lista (como el modelo por defecto `gpt-3.5-turbo` o `gpt-4o`), el servidor aplicará un **fallback automático** a `deepseek-chat` para evitar que la automatización se detenga con un error 404.
