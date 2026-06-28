@@ -14,6 +14,16 @@ SERVER_INTERACTIVE_LOGIN = os.getenv("SERVER_INTERACTIVE_LOGIN", "1").lower() no
     "0", "false", "no", "off",
 )
 
+# Admin token to secure the /v1/session/import endpoint (leave empty to disable endpoint)
+PROXY_ADMIN_TOKEN = os.getenv("PROXY_ADMIN_TOKEN", "").strip() or None
+
+# API key to secure user endpoints /v1/chat/completions and /v1/models (leave empty to keep them public)
+DEEPSEEK_PROXY_API_KEY = os.getenv("DEEPSEEK_PROXY_API_KEY", "").strip() or None
+
+# Discord, Slack, or generic webhook URL to send notifications when session expires critically
+SESSION_ALERT_WEBHOOK_URL = os.getenv("SESSION_ALERT_WEBHOOK_URL", "").strip() or None
+
+
 # Public model ids the server advertises (via /v1/models) and accepts, mapped to
 # DeepSeek's `model_type` wire value. This is the MODEL axis ONLY — it picks
 # which model answers. DeepThink and web Search are orthogonal tools requested

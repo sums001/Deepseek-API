@@ -91,9 +91,6 @@ class DeepSeekClient:
         # opening a browser window. The server passes False (see server/api.py).
         self.session = session or get_session(allow_interactive=allow_interactive)
         self._pow = DeepSeekPow()
-        # The wasmtime Store behind the PoW solver is not reentrant; serialise
-        # access so concurrent server requests don't corrupt it.
-        self._pow_lock = threading.Lock()
         self._http = httpx.Client(
             base_url=BASE,
             headers=self._base_headers(),
@@ -130,8 +127,7 @@ class DeepSeekClient:
         )
         r.raise_for_status()
         challenge = _biz(r.json())["challenge"]
-        with self._pow_lock:
-            return self._pow.make_header(challenge)
+        return self._pow.make_header(challenge)
 
     # --- public API ---------------------------------------------------------
 

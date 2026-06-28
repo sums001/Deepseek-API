@@ -21,24 +21,32 @@ RATE_LIMIT_PER_MINUTE); /healthz is exempt.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import threading
 import time
 import uuid
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, Header, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
+import httpx
 from starlette.concurrency import run_in_threadpool
 
-from deepseek.auth import LoginRequired
+from deepseek.auth import LoginRequired, Session, login, DEFAULT_PROFILE_DIR
 from deepseek.client import DeepSeekClient
 
 from .config import (
     MODEL_MAP,
     RATE_LIMIT_PER_MINUTE,
     SERVER_INTERACTIVE_LOGIN,
+    PROXY_ADMIN_TOKEN,
+    DEEPSEEK_PROXY_API_KEY,
+    SESSION_ALERT_WEBHOOK_URL,
     is_known_model,
     resolve_model_type,
     parse_virtual_model,
@@ -48,10 +56,50 @@ from .openai_format import completion_response, messages_to_prompt, stream_chunk
 from .ratelimit import RateLimiter, install_rate_limit
 from .schemas import ChatCompletionRequest
 
+# Configuración de Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("deepseek_proxy")
+
+
+proxy_key_scheme = HTTPBearer(scheme_name="ProxyApiKeyAuth", auto_error=False)
+admin_token_scheme = HTTPBearer(scheme_name="AdminTokenAuth", auto_error=False)
+
+
+def verify_proxy_api_key(credentials: HTTPAuthorizationCredentials = Depends(proxy_key_scheme)):
+    if not DEEPSEEK_PROXY_API_KEY:
+        return
+    if not credentials or credentials.credentials != DEEPSEEK_PROXY_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key in Authorization header."
+        )
+
+
+def verify_admin_token(credentials: HTTPAuthorizationCredentials = Depends(admin_token_scheme)):
+    if not PROXY_ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Session import endpoint is disabled because PROXY_ADMIN_TOKEN is not configured."
+        )
+    if not credentials or credentials.credentials != PROXY_ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing Admin token in Authorization header."
+        )
+
+
 load_dotenv()
 
 app = FastAPI(title="DeepSeek OpenAI-compatible API", version="0.1.0")
 install_rate_limit(app, RateLimiter(limit=RATE_LIMIT_PER_MINUTE, window=60.0))
+
+
+class SessionImportRequest(BaseModel):
+    token: str
+    cookies: dict
+    user_agent: str
+    captured_at: float
+
 
 # One shared client (and its signed-in session) built lazily on first use.
 _client: DeepSeekClient | None = None
@@ -78,6 +126,112 @@ def get_client() -> DeepSeekClient:
     return _client
 
 
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(session_keep_alive_loop())
+
+
+@app.post("/v1/session/import", dependencies=[Depends(verify_admin_token)])
+async def import_session(req: SessionImportRequest):
+    
+    try:
+        session_obj = Session(
+            token=req.token,
+            cookies=req.cookies,
+            user_agent=req.user_agent,
+            captured_at=req.captured_at
+        )
+        
+        await run_in_threadpool(session_obj.save)
+        
+        global _client
+        with _client_lock:
+            if _client is not None:
+                try:
+                    await run_in_threadpool(_client.close)
+                except Exception:
+                    pass
+            _client = DeepSeekClient(session=session_obj, allow_interactive=SERVER_INTERACTIVE_LOGIN)
+            
+        logger.info("Session imported successfully and client reloaded.")
+        return {"status": "ok", "message": "Session imported successfully and client reloaded."}
+    except Exception as e:
+        logger.error(f"Failed to import session: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to import session: {str(e)}"
+        )
+
+
+async def send_webhook_alert(message: str):
+    if not SESSION_ALERT_WEBHOOK_URL:
+        return
+    try:
+        async with httpx.AsyncClient() as client:
+            payload = {
+                "content": f"🚨 **[DeepSeek Proxy Alert]** {message}"
+            }
+            resp = await client.post(SESSION_ALERT_WEBHOOK_URL, json=payload, timeout=10.0)
+            if resp.status_code >= 400:
+                logger.error(f"Webhook alert failed with status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        logger.error(f"Failed to send webhook alert: {e}")
+
+
+def verify_and_refresh_session():
+    """Verify if the current session is valid; if expired or older than 4 hours, refresh it."""
+    global _client
+    client = get_client()
+    
+    session = client.session
+    age_seconds = time.time() - session.captured_at
+    if age_seconds > 4 * 60 * 60:
+        logger.info(f"Session age ({age_seconds / 3600:.1f} hours) exceeds 4 hours. Proactively refreshing headlessly...")
+        new_session = login(profile_dir=DEFAULT_PROFILE_DIR, headless=True)
+        with _client_lock:
+            client.session = new_session
+            client._http.cookies.update(new_session.cookies)
+            client._http.headers["authorization"] = f"Bearer {new_session.token}"
+            client._http.headers["user-agent"] = new_session.user_agent
+        logger.info("Session refreshed headlessly successfully (proactive).")
+        return
+
+    try:
+        # Check WAF/token validity
+        client._pow_header()
+        logger.debug("Session verified successfully (active WAF and token).")
+    except Exception as e:
+        logger.warning(f"Session validation ping failed: {e}. Attempting headless recovery...")
+        try:
+            new_session = login(profile_dir=DEFAULT_PROFILE_DIR, headless=True)
+            with _client_lock:
+                client.session = new_session
+                client._http.cookies.update(new_session.cookies)
+                client._http.headers["authorization"] = f"Bearer {new_session.token}"
+                client._http.headers["user-agent"] = new_session.user_agent
+            logger.info("Session refreshed headlessly successfully after validation failure.")
+        except Exception as refresh_error:
+            logger.error(f"Headless session recovery failed: {refresh_error}")
+            raise LoginRequired(
+                f"Headless session recovery failed. Interactive login or manual import required. Details: {refresh_error}"
+            )
+
+
+async def session_keep_alive_loop():
+    logger.info("Starting DeepSeek session keep-alive loop.")
+    await asyncio.sleep(5)
+    while True:
+        try:
+            await run_in_threadpool(verify_and_refresh_session)
+        except LoginRequired as e:
+            alert_msg = "DeepSeek session has expired critically. Headless refresh failed. Please run `python -m deepseek.auth` or use `/v1/session/import` to restore access."
+            logger.critical(alert_msg)
+            await send_webhook_alert(alert_msg)
+        except Exception as e:
+            logger.error(f"Session keep-alive loop check failed: {e}")
+        await asyncio.sleep(1800)
+
+
 def _error(message: str, status: int = 500, err_type: str = "server_error"):
     return JSONResponse(
         status_code=status,
@@ -90,7 +244,7 @@ def healthz():
     return {"status": "ok"}
 
 
-@app.get("/v1/models")
+@app.get("/v1/models", dependencies=[Depends(verify_proxy_api_key)])
 def list_models():
     created = int(time.time())
     return {
@@ -102,7 +256,7 @@ def list_models():
     }
 
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_proxy_api_key)])
 async def chat_completions(req: ChatCompletionRequest):
     if not req.messages:
         return _error("`messages` must not be empty", status=400, err_type="invalid_request_error")
