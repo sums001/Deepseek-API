@@ -1,0 +1,18 @@
+[Unit]
+Description=Deepseek API Wrapper Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Deepseek-API
+# Ejecuta python directamente desde el entorno virtual (esto lo activa automáticamente)
+ExecStart=/root/Deepseek-API/.venv/bin/python app.py
+Restart=always
+RestartSec=5
+
+# Variables de entorno
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
