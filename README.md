@@ -155,15 +155,40 @@ curl http://localhost:8000/v1/chat/completions \
 
 **Endpoints**
 
-| Method | Path | Description |
-| --- | --- | --- |
-| `POST` | `/v1/chat/completions` | Chat (supports `"stream": true`, plus optional `"conversation_id"`, `"thinking"`, `"search"`) |
-| `GET`  | `/v1/models` | Lists the available models |
-| `GET`  | `/healthz` | Health check (rate-limit exempt) |
+| Method | Path | Description | Authentication |
+| --- | --- | --- | --- |
+| `POST` | `/v1/chat/completions` | Chat completions (supports `"stream": true`, plus optional `"conversation_id"`, `"thinking"`, `"search"`, `"user"`) | Bearer Proxy API Key |
+| `GET`  | `/v1/models` | Lists the available models | Bearer Proxy API Key |
+| `GET`  | `/v1/chat/sessions` | Lists chat sessions from the DeepSeek dashboard (supports date filtering via `?days=N`) | Bearer Proxy API Key |
+| `DELETE` | `/v1/chat/session/{user_id}` | Deletes a user's session from DeepSeek and the local mapping | Bearer Proxy API Key |
+| `POST` | `/v1/session/import` | Administratively imports a raw session JSON and hot-reloads client | Bearer Admin Token |
+| `GET`  | `/healthz` | Health check | Exempt |
 
 > Change the address with env vars: `HOST=0.0.0.0 PORT=8080 python app.py`, or run `uvicorn server.api:app --host 0.0.0.0 --port 8080`.
 
 👉 More: [examples/04_server_http.py](examples/04_server_http.py), [examples/05_server_stream.py](examples/05_server_stream.py), [examples/06_server_openai_sdk.py](examples/06_server_openai_sdk.py)
+
+#### 🔑 Authentication & API Keys
+
+To protect your proxy from unauthorized access, configure these key variables in your `.env` file:
+*   `DEEPSEEK_PROXY_API_KEY`: A standard API Key (e.g. `sk-my-proxy-key`) that clients must send in the standard `Authorization: Bearer <KEY>` header when calling `/v1/chat/completions`, `/v1/models`, or `/v1/chat/sessions`.
+*   `PROXY_ADMIN_TOKEN`: A token used to secure administrative endpoints like `/v1/session/import`.
+*   **Swagger Interactive Authorization:** When visiting `http://localhost:8000/docs`, you will see lock icons on the endpoints and an "Authorize" button. Click "Authorize", paste your configured key, and you can test endpoints interactively.
+
+#### 🧠 Automatic Session Mapping & Memory (the `user` parameter)
+
+For stateless clients (like **n8n**, **WhatsApp bots**, or **Telegram bots**) that do not maintain conversation IDs natively, the proxy includes an **automatic session mapping layer**:
+1.  **Passing the `user` ID:** In your chat completions payload, pass a unique identifier (like the WhatsApp phone number or a session ID) in the standard OpenAI `user` parameter:
+    ```json
+    {
+      "model": "deepseek-chat",
+      "messages": [{"role": "user", "content": "Hello!"}],
+      "user": "whatsapp_+34600000000"
+    }
+    ```
+2.  **Thread Resuming & Isolation:** The proxy maps this `user` ID to a unique DeepSeek thread ID in `session/user_threads.json`. On subsequent requests, it resumes that thread automatically. Each user's context is completely isolated.
+3.  **Native DeepSeek Memory:** When resuming a thread, the proxy sends **only the latest user message** to DeepSeek. This lets DeepSeek's backend manage conversation memory natively, preventing duplicate histories and reducing bandwidth.
+4.  **Memory Reset:** To clear a user's thread (erasing their memory and deleting the chat from your DeepSeek dashboard), call `DELETE /v1/chat/session/{user_id}`.
 
 #### 🔌 n8n Integration & AI Agents
 
