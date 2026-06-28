@@ -31,13 +31,48 @@ DEFAULT_MODEL = "deepseek-chat"
 
 
 def is_known_model(name: str) -> bool:
-    """Whether `name` is a model id we accept (used to 404 unknown models)."""
-    return name in MODEL_MAP
+    """Whether `name` is a model id we accept.
+    We return True for everything to allow automatic fallback to DEFAULT_MODEL,
+    preventing 404 errors in strict clients like LangChain/n8n.
+    """
+    return True
 
 
 def resolve_model_type(name: str) -> str:
-    """Translate a public model id to DeepSeek's `model_type` wire value.
+    """Translate a public model id to DeepSeek's `model_type` wire value."""
+    base_model = name if name in MODEL_MAP else DEFAULT_MODEL
+    return MODEL_MAP[base_model]
 
-    Caller must check `is_known_model` first; this raises KeyError otherwise.
+
+def parse_virtual_model(name: str) -> tuple[str, bool, bool]:
+    """Parse virtual suffixes like -thinking and -search from the model name.
+    
+    If the base model is unknown, it falls back to DEFAULT_MODEL.
+    
+    Returns:
+        tuple: (base_model_name, thinking_enabled, search_enabled)
     """
-    return MODEL_MAP[name]
+    name_lower = name.lower().strip()
+    thinking = False
+    search = False
+    
+    if "-thinking" in name_lower:
+        thinking = True
+        name_lower = name_lower.replace("-thinking", "")
+    if "-search" in name_lower:
+        search = True
+        name_lower = name_lower.replace("-search", "")
+        
+    base_model = name_lower if name_lower in MODEL_MAP else DEFAULT_MODEL
+    return base_model, thinking, search
+
+
+def get_all_model_names() -> list[str]:
+    """Return all available models including virtual combinations for client dropdowns."""
+    names = []
+    for base in MODEL_MAP.keys():
+        names.append(base)
+        names.append(f"{base}-thinking")
+        names.append(f"{base}-search")
+        names.append(f"{base}-thinking-search")
+    return names

@@ -164,6 +164,12 @@ curl http://localhost:8000/v1/chat/completions \
 
 👉 More: [examples/04_server_http.py](examples/04_server_http.py), [examples/05_server_stream.py](examples/05_server_stream.py), [examples/06_server_openai_sdk.py](examples/06_server_openai_sdk.py)
 
+#### 🔌 n8n Integration & AI Agents
+
+This server is fully compatible with **n8n** (using the OpenAI Chat Model node inside the AI Agent). Since n8n does not easily support custom request body parameters, the server exposes **virtual model names** (e.g. `deepseek-chat-thinking-search`) to toggle DeepThink and web search.
+
+See the [n8n Integration Guide](N8N_INTEGRATION.md) for step-by-step setup details.
+
 ---
 
 ## Command line & Headless Import/Export

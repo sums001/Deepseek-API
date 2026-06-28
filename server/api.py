@@ -38,6 +38,8 @@ from .config import (
     SERVER_INTERACTIVE_LOGIN,
     is_known_model,
     resolve_model_type,
+    parse_virtual_model,
+    get_all_model_names,
 )
 from .openai_format import completion_response, messages_to_prompt, stream_chunks
 from .ratelimit import RateLimiter, install_rate_limit
@@ -92,7 +94,7 @@ def list_models():
         "object": "list",
         "data": [
             {"id": name, "object": "model", "created": created, "owned_by": "deepseek"}
-            for name in MODEL_MAP
+            for name in get_all_model_names()
         ],
     }
 
@@ -102,16 +104,14 @@ async def chat_completions(req: ChatCompletionRequest):
     if not req.messages:
         return _error("`messages` must not be empty", status=400, err_type="invalid_request_error")
 
-    if not is_known_model(req.model):
-        return _error(
-            f"The model `{req.model}` does not exist. Available models: "
-            f"{', '.join(MODEL_MAP)}",
-            status=404, err_type="model_not_found",
-        )
+    # Parse virtual model name to extract thinking/search suffixes and handle fallback for unknown models
+    base_model, virtual_thinking, virtual_search = parse_virtual_model(req.model)
+    thinking = req.thinking or virtual_thinking
+    search = req.search or virtual_search
 
     # A thread's model is fixed when it's created, so on resume we ignore `model`
     # (the OpenAI SDK always sends one) and let the existing thread's model stand.
-    model_type = None if req.conversation_id else resolve_model_type(req.model)
+    model_type = None if req.conversation_id else resolve_model_type(base_model)
     prompt = messages_to_prompt(req.messages)
 
     try:
@@ -127,7 +127,7 @@ async def chat_completions(req: ChatCompletionRequest):
         def gen():
             stream = client.stream(
                 prompt, conversation_id=req.conversation_id,
-                model=model_type, thinking=req.thinking, search=req.search,
+                model=model_type, thinking=thinking, search=search,
             )
             yield from stream_chunks(req.model, stream)
 
@@ -136,7 +136,7 @@ async def chat_completions(req: ChatCompletionRequest):
     try:
         reply = await run_in_threadpool(
             client.chat, prompt, req.conversation_id,
-            model_type, req.thinking, req.search,
+            model_type, thinking, search,
         )
     except Exception as e:
         return _error(f"DeepSeek request failed: {e}")
