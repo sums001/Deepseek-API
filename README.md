@@ -166,11 +166,35 @@ curl http://localhost:8000/v1/chat/completions \
 
 ---
 
-## Command line
+## Command line & Headless Import/Export
 
+For local environments with a GUI:
 ```bash
-python -m deepseek.auth          # sign in and save the session
+python -m deepseek.auth          # sign in via browser and save the session
 ```
+
+### Remote / Headless Environments (VPS, Docker, Proxmox)
+
+If you run the server on a remote headless machine, you cannot open a browser to log in. Instead, you can export your active session from your local GUI machine and import it on the remote machine:
+
+1. **On your local machine (with GUI)**:
+   * Sign in to generate a session:
+     ```bash
+     python -m deepseek.auth
+     ```
+   * Export the active session details as a JSON block:
+     ```bash
+     python -m deepseek.auth --export
+     ```
+   * Copy the JSON output from the terminal.
+
+2. **On your remote machine (headless/no GUI)**:
+   * Run the import command:
+     ```bash
+     python -m deepseek.auth --import
+     ```
+   * Paste the JSON block you copied and press `Ctrl+D` (on Linux) or `Ctrl+Z` (on Windows) then `Enter` to save the session.
+   * Make sure to set `SERVER_INTERACTIVE_LOGIN=false` in your `.env` to prevent the server from trying to launch a browser remote-side.
 
 ---
 
