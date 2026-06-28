@@ -65,14 +65,34 @@ proxy_key_scheme = HTTPBearer(scheme_name="ProxyApiKeyAuth", auto_error=False)
 admin_token_scheme = HTTPBearer(scheme_name="AdminTokenAuth", auto_error=False)
 
 
-def verify_proxy_api_key(credentials: HTTPAuthorizationCredentials = Depends(proxy_key_scheme)):
+def verify_proxy_api_key(credentials: HTTPAuthorizationCredentials = Depends(proxy_key_scheme)) -> str | None:
     if not DEEPSEEK_PROXY_API_KEY:
-        return
-    if not credentials or credentials.credentials != DEEPSEEK_PROXY_API_KEY:
+        if credentials and credentials.credentials:
+            token = credentials.credentials
+            if ":" in token:
+                return token.split(":", 1)[1]
+            return token
+        return None
+
+    if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key in Authorization header."
         )
+
+    token = credentials.credentials
+    if token == DEEPSEEK_PROXY_API_KEY:
+        return None
+
+    prefix = f"{DEEPSEEK_PROXY_API_KEY}:"
+    if token.startswith(prefix):
+        return token[len(prefix):]
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing API key in Authorization header."
+    )
+
 
 
 def verify_admin_token(credentials: HTTPAuthorizationCredentials = Depends(admin_token_scheme)):
@@ -291,22 +311,26 @@ def list_models():
     }
 
 
-@app.post("/v1/chat/completions", dependencies=[Depends(verify_proxy_api_key)])
-async def chat_completions(req: ChatCompletionRequest):
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    req: ChatCompletionRequest,
+    auth_user_id: str | None = Depends(verify_proxy_api_key)
+):
     if not req.messages:
         return _error("`messages` must not be empty", status=400, err_type="invalid_request_error")
 
     # Parse virtual model name to extract thinking/search suffixes and handle fallback for unknown models
-    base_model, virtual_thinking, virtual_search = parse_virtual_model(req.model)
+    base_model, virtual_thinking, virtual_search, virtual_user_id = parse_virtual_model(req.model)
     thinking = req.thinking or virtual_thinking
     search = req.search or virtual_search
+    user_id = req.user or auth_user_id or virtual_user_id
 
     # Determine conversation_id:
     # 1. From request body
     # 2. From user session mapping if conversation_id is not passed
     conversation_id = req.conversation_id
-    if not conversation_id and req.user:
-        conversation_id = get_conversation_id_for_user(req.user)
+    if not conversation_id and user_id:
+        conversation_id = get_conversation_id_for_user(user_id)
 
     # A thread's model is fixed when it's created, so on resume we ignore `model`
     # (the OpenAI SDK always sends one) and let the existing thread's model stand.
@@ -342,8 +366,8 @@ async def chat_completions(req: ChatCompletionRequest):
             
             # Once stream is consumed, save mapping if user was specified
             new_cid = getattr(stream, "conversation_id", None)
-            if req.user and new_cid:
-                save_conversation_id_for_user(req.user, new_cid)
+            if user_id and new_cid:
+                save_conversation_id_for_user(user_id, new_cid)
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -388,13 +412,14 @@ async def chat_completions(req: ChatCompletionRequest):
             except Exception:
                 pass
 
-    if req.user and reply.conversation_id:
-        await run_in_threadpool(save_conversation_id_for_user, req.user, reply.conversation_id)
+    if user_id and reply.conversation_id:
+        await run_in_threadpool(save_conversation_id_for_user, user_id, reply.conversation_id)
 
     return completion_response(
         req.model, reply.text, prompt, reply.conversation_id,
         tool_calls=tool_calls, finish_reason=finish_reason
     )
+
 
 
 @app.delete("/v1/chat/session/{user_id}", dependencies=[Depends(verify_proxy_api_key)])

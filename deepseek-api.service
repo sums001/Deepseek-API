@@ -13,6 +13,8 @@ RestartSec=5
 
 # Variables de entorno
 Environment=PYTHONUNBUFFERED=1
+Environment=PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64
+
 
 [Install]
 WantedBy=multi-user.target

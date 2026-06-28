@@ -22,17 +22,40 @@ Esta guía explica cómo configurar y ejecutar el proxy de DeepSeek API como un 
    ```
 
 3. **Instalar Dependencias de Playwright (Muy Importante en Linux sin interfaz gráfica):**
-   Para que Chromium (el navegador headless usado para resolver PoW y autenticar) funcione correctamente, debes instalar el navegador y las librerías del sistema necesarias:
+   Dado que estás usando una versión de Ubuntu muy nueva (Ubuntu 26.04) que Playwright aún no reconoce oficialmente para Chromium, debes forzar a Playwright a usar el binario de Ubuntu 24.04 utilizando la variable de entorno `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64`:
    ```bash
-   # Activar el entorno virtual si no lo está
-   source .venv/bin/activate
-
-   # Instalar Chromium
-   playwright install chromium
-
-   # Instalar dependencias del sistema operativo para Chromium (requiere sudo/root)
-   playwright install-deps chromium
+   # Instalar los navegadores forzando la plataforma a ubuntu24.04-x64
+   PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 /root/Deepseek-API/.venv/bin/playwright install
    ```
+
+   **Si `playwright install-deps` falla** debido a paquetes obsoletos en los repositorios de Ubuntu 26.04 (como `libavcodec60`, `libicu74` o `libx264-164`), debes instalar manualmente las dependencias principales que Chromium necesita para correr en modo headless (evitando los codecs de video opcionales que causan el fallo):
+   ```bash
+   # Instalar dependencias del sistema de manera manual
+   apt-get update && apt-get install -y \
+       libxcb-shm0 \
+       libx11-xcb1 \
+       libxrandr2 \
+       libxcomposite1 \
+       libxcursor1 \
+       libxdamage1 \
+       libxi6 \
+       libxfixes3 \
+       libgtk-3-0t64 \
+       libpangocairo-1.0-0 \
+       libpango-1.0-0 \
+       libatk1.0-0t64 \
+       libcairo-gobject2 \
+       libcairo2 \
+       libgdk-pixbuf-2.0-0 \
+       libxrender1 \
+       libasound2t64 \
+       libfreetype6 \
+       libfontconfig1
+   ```
+   > **Nota:** Si actualizas la librería `playwright` (por ejemplo, al actualizar dependencias desde `requirements.txt`), siempre debes volver a ejecutar la instalación (`playwright install`) para descargar las versiones de los navegadores correspondientes.
+
+
+
 
 4. **Configurar el archivo `.env`:**
    Copia el archivo de ejemplo y edítalo:

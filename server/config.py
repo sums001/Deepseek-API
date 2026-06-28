@@ -54,14 +54,21 @@ def resolve_model_type(name: str) -> str:
     return MODEL_MAP[base_model]
 
 
-def parse_virtual_model(name: str) -> tuple[str, bool, bool]:
+def parse_virtual_model(name: str) -> tuple[str, bool, bool, str | None]:
     """Parse virtual suffixes like -thinking and -search from the model name.
+    Also parses optional user ID suffix like ':user_id'.
     
     If the base model is unknown, it falls back to DEFAULT_MODEL.
     
     Returns:
-        tuple: (base_model_name, thinking_enabled, search_enabled)
+        tuple: (base_model_name, thinking_enabled, search_enabled, user_id)
     """
+    user_id = None
+    if ":" in name:
+        parts = name.split(":", 1)
+        name = parts[0]
+        user_id = parts[1].strip() or None
+
     name_lower = name.lower().strip()
     thinking = False
     search = False
@@ -74,7 +81,8 @@ def parse_virtual_model(name: str) -> tuple[str, bool, bool]:
         name_lower = name_lower.replace("-search", "")
         
     base_model = name_lower if name_lower in MODEL_MAP else DEFAULT_MODEL
-    return base_model, thinking, search
+    return base_model, thinking, search, user_id
+
 
 
 def get_all_model_names() -> list[str]:

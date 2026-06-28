@@ -41,6 +41,30 @@ Puedes seleccionar o escribir los siguientes nombres de modelos en n8n:
 
 ---
 
+## 🧠 Persistencia de Sesión e Historial (Thread Mapping) en n8n
+
+Dado que las herramientas y nodos de n8n no siempre exponen de forma gráfica el parámetro `"user"` estándar de OpenAI en la interfaz de usuario, el servidor de DeepSeek API admite dos alternativas muy sencillas para persistir las conversaciones en un único hilo por usuario/sesión:
+
+### Método A: Sufijo en el Nombre del Modelo (Recomendado)
+Puedes adjuntar el identificador de usuario/sesión directamente al nombre del modelo separándolo con dos puntos (`:`).
+En el campo **Model** del nodo *OpenAI Chat Model*, selecciona la pestaña **Expression** y escribe:
+```js
+=deepseek-chat:{{ $('When chat message received').item.json.sessionId }}
+```
+*También funciona con modelos avanzados, por ejemplo: `=deepseek-chat-thinking:{{ $('When chat message received').item.json.sessionId }}`.*
+
+### Método B: Sufijo en la Credencial (API Key)
+Si no deseas modificar el nombre del modelo, puedes adjuntar el ID de la sesión directamente a la API Key en la configuración de la credencial de OpenAI en n8n, separándolo con dos puntos (`:`):
+```text
+tu_api_key_del_proxy:{{ $('When chat message received').item.json.sessionId }}
+```
+*(Por ejemplo: `test_proxy_key_123:{{ $('When chat message received').item.json.sessionId }}` o, si el proxy no tiene API Key configurada, simplemente `:{{ $('When chat message received').item.json.sessionId }}`).*
+
+Cualquiera de los dos métodos le indica al proxy que asocie esa interacción a la sesión de n8n, evitando que se cree un chat nuevo en tu dashboard de DeepSeek por cada mensaje enviado.
+
+---
+
+
 ## Soporte de Herramientas (Tool/Function Calling)
 
 El proxy soporta la ejecución de herramientas (**Tool/Function Calling**) desde n8n de forma nativa. 
