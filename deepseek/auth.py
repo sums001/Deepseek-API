@@ -112,9 +112,13 @@ def _wait_for_token(page, timeout: float) -> Optional[str]:
     """Poll localStorage.userToken until it appears or we time out."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        token = page.evaluate(_READ_TOKEN_JS)
-        if token:
-            return token
+        try:
+            token = page.evaluate(_READ_TOKEN_JS)
+            if token:
+                return token
+        except Exception:
+            # Tolerarse cuando la página navega y destruye temporalmente el contexto de ejecución
+            pass
         page.wait_for_timeout(1000)
     return None
 
@@ -245,5 +249,36 @@ def get_session(
 
 
 if __name__ == "__main__":
-    s = login()
-    print(f"[auth] captured token {s.token[:10]}... ({len(s.cookies)} cookies)")
+    import sys
+    if "--import" in sys.argv:
+        print("Pega el contenido JSON de tu sesión y presiona Ctrl+D (Linux) o Ctrl+Z (Windows) seguido de Enter al finalizar:")
+        try:
+            raw = sys.stdin.read().strip()
+            if not raw:
+                print("[auth] Entrada vacía. Cancelado.")
+                sys.exit(1)
+            data = json.loads(raw)
+            required = {"token", "cookies", "user_agent", "captured_at"}
+            if not required.issubset(data.keys()):
+                raise ValueError(f"Faltan campos requeridos en el JSON: {required - data.keys()}")
+            
+            s = Session(
+                token=data["token"],
+                cookies=data["cookies"],
+                user_agent=data["user_agent"],
+                captured_at=data["captured_at"]
+            )
+            s.save()
+            print("[auth] ¡Sesión importada y guardada con éxito!")
+        except Exception as e:
+            print(f"[auth] Error al importar la sesión: {e}")
+            sys.exit(1)
+    elif "--export" in sys.argv:
+        s = Session.load()
+        if s:
+            print(json.dumps(asdict(s), indent=2))
+        else:
+            print("[auth] No hay ninguna sesión guardada para exportar.")
+    else:
+        s = login()
+        print(f"[auth] captured token {s.token[:10]}... ({len(s.cookies)} cookies)")

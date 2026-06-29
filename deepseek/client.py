@@ -91,9 +91,6 @@ class DeepSeekClient:
         # opening a browser window. The server passes False (see server/api.py).
         self.session = session or get_session(allow_interactive=allow_interactive)
         self._pow = DeepSeekPow()
-        # The wasmtime Store behind the PoW solver is not reentrant; serialise
-        # access so concurrent server requests don't corrupt it.
-        self._pow_lock = threading.Lock()
         self._http = httpx.Client(
             base_url=BASE,
             headers=self._base_headers(),
@@ -130,8 +127,7 @@ class DeepSeekClient:
         )
         r.raise_for_status()
         challenge = _biz(r.json())["challenge"]
-        with self._pow_lock:
-            return self._pow.make_header(challenge)
+        return self._pow.make_header(challenge)
 
     # --- public API ---------------------------------------------------------
 
@@ -181,6 +177,20 @@ class DeepSeekClient:
                         model=model, thinking=thinking, search=search)
         text = "".join(s)
         return Reply(text=text, conversation_id=s.conversation_id)
+
+    def fetch_chat_sessions(self, page_size: int = 100) -> list[dict]:
+        """Fetch chat sessions from DeepSeek web backend."""
+        r = self._http.get("/api/v0/chat_session/fetch_page", params={"page_size": page_size})
+        r.raise_for_status()
+        return _biz(r.json()).get("chat_sessions", [])
+
+    def delete_chat_session(self, conversation_id: str) -> None:
+        """Delete a chat session from DeepSeek using its conversation_id or raw session_id."""
+        session_id, _ = _decode_cid(conversation_id)
+        if not session_id:
+            session_id = conversation_id
+        r = self._http.post("/api/v0/chat_session/delete", json={"chat_session_id": session_id})
+        r.raise_for_status()
 
     def close(self) -> None:
         self._http.close()

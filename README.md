@@ -23,6 +23,7 @@ You sign in once in a browser with your DeepSeek account; your session is saved 
 - [Command line](#command-line)
 - [Human-check & proof-of-work (automatic)](#human-check--proof-of-work-automatic)
 - [Models, DeepThink & web search](#models-deepthink--web-search)
+- [Tool / Function Calling (Emulated)](#tool--function-calling-emulated)
 - [Concurrency](#concurrency)
 - [Rate limiting](#rate-limiting)
 - [Project layout](#project-layout)
@@ -154,23 +155,78 @@ curl http://localhost:8000/v1/chat/completions \
 
 **Endpoints**
 
-| Method | Path | Description |
-| --- | --- | --- |
-| `POST` | `/v1/chat/completions` | Chat (supports `"stream": true`, plus optional `"conversation_id"`, `"thinking"`, `"search"`) |
-| `GET`  | `/v1/models` | Lists the available models |
-| `GET`  | `/healthz` | Health check (rate-limit exempt) |
+| Method | Path | Description | Authentication |
+| --- | --- | --- | --- |
+| `POST` | `/v1/chat/completions` | Chat completions (supports `"stream": true`, plus optional `"conversation_id"`, `"thinking"`, `"search"`, `"user"`) | Bearer Proxy API Key |
+| `GET`  | `/v1/models` | Lists the available models | Bearer Proxy API Key |
+| `GET`  | `/v1/chat/sessions` | Lists chat sessions from the DeepSeek dashboard (supports date filtering via `?days=N`) | Bearer Proxy API Key |
+| `DELETE` | `/v1/chat/session/{user_id}` | Deletes a user's session from DeepSeek and the local mapping | Bearer Proxy API Key |
+| `POST` | `/v1/session/import` | Administratively imports a raw session JSON and hot-reloads client | Bearer Admin Token |
+| `GET`  | `/healthz` | Health check | Exempt |
 
 > Change the address with env vars: `HOST=0.0.0.0 PORT=8080 python app.py`, or run `uvicorn server.api:app --host 0.0.0.0 --port 8080`.
 
 👉 More: [examples/04_server_http.py](examples/04_server_http.py), [examples/05_server_stream.py](examples/05_server_stream.py), [examples/06_server_openai_sdk.py](examples/06_server_openai_sdk.py)
 
+#### 🔑 Authentication & API Keys
+
+To protect your proxy from unauthorized access, configure these key variables in your `.env` file:
+*   `DEEPSEEK_PROXY_API_KEY`: A standard API Key (e.g. `sk-my-proxy-key`) that clients must send in the standard `Authorization: Bearer <KEY>` header when calling `/v1/chat/completions`, `/v1/models`, or `/v1/chat/sessions`.
+*   `PROXY_ADMIN_TOKEN`: A token used to secure administrative endpoints like `/v1/session/import`.
+*   **Swagger Interactive Authorization:** When visiting `http://localhost:8000/docs`, you will see lock icons on the endpoints and an "Authorize" button. Click "Authorize", paste your configured key, and you can test endpoints interactively.
+
+#### 🧠 Automatic Session Mapping & Memory (the `user` parameter)
+
+For stateless clients (like **n8n**, **WhatsApp bots**, or **Telegram bots**) that do not maintain conversation IDs natively, the proxy includes an **automatic session mapping layer**:
+1.  **Passing the `user` ID:** In your chat completions payload, pass a unique identifier (like the WhatsApp phone number or a session ID) in the standard OpenAI `user` parameter:
+    ```json
+    {
+      "model": "deepseek-chat",
+      "messages": [{"role": "user", "content": "Hello!"}],
+      "user": "whatsapp_+34600000000"
+    }
+    ```
+2.  **Thread Resuming & Isolation:** The proxy maps this `user` ID to a unique DeepSeek thread ID in `session/user_threads.json`. On subsequent requests, it resumes that thread automatically. Each user's context is completely isolated.
+3.  **Native DeepSeek Memory:** When resuming a thread, the proxy sends **only the latest user message** to DeepSeek. This lets DeepSeek's backend manage conversation memory natively, preventing duplicate histories and reducing bandwidth.
+4.  **Memory Reset:** To clear a user's thread (erasing their memory and deleting the chat from your DeepSeek dashboard), call `DELETE /v1/chat/session/{user_id}`.
+
+#### 🔌 n8n Integration & AI Agents
+
+This server is fully compatible with **n8n** (using the OpenAI Chat Model node inside the AI Agent). Since n8n does not easily support custom request body parameters, the server exposes **virtual model names** (e.g. `deepseek-chat-thinking-search`) to toggle DeepThink and web search.
+
+See the [n8n Integration Guide](N8N_INTEGRATION.md) for step-by-step setup details.
+
 ---
 
-## Command line
+## Command line & Headless Import/Export
 
+For local environments with a GUI:
 ```bash
-python -m deepseek.auth          # sign in and save the session
+python -m deepseek.auth          # sign in via browser and save the session
 ```
+
+### Remote / Headless Environments (VPS, Docker, Proxmox)
+
+If you run the server on a remote headless machine, you cannot open a browser to log in. Instead, you can export your active session from your local GUI machine and import it on the remote machine:
+
+1. **On your local machine (with GUI)**:
+   * Sign in to generate a session:
+     ```bash
+     python -m deepseek.auth
+     ```
+   * Export the active session details as a JSON block:
+     ```bash
+     python -m deepseek.auth --export
+     ```
+   * Copy the JSON output from the terminal.
+
+2. **On your remote machine (headless/no GUI)**:
+   * Run the import command:
+     ```bash
+     python -m deepseek.auth --import
+     ```
+   * Paste the JSON block you copied and press `Ctrl+D` (on Linux) or `Ctrl+Z` (on Windows) then `Enter` to save the session.
+   * Make sure to set `SERVER_INTERACTIVE_LOGIN=false` in your `.env` to prevent the server from trying to launch a browser remote-side.
 
 ---
 
@@ -217,6 +273,44 @@ resp = client.chat.completions.create(
 model is fixed at creation, so `model` can't be combined with `conversation_id`
 on resume. Unknown model names return a `404` (no silent fallback). See
 [server/config.py](server/config.py).
+
+---
+
+## Tool / Function Calling (Emulated)
+
+The server supports emulated OpenAI-style **Tool/Function Calling**. Since the web version of DeepSeek does not natively support tool registration via the API, the proxy handles this transparently:
+
+1. **System Instruction Injection:** When you pass a `tools` list in the OpenAI request, the proxy formats their descriptions and parameters, appending them as a system instruction at the start of the prompt.
+2. **JSON Parsing:** If the model outputs a JSON block requesting a tool call, the proxy intercepts the response, extracts the call, and maps it back into the standard OpenAI `tool_calls` structure.
+
+This allows any OpenAI-compatible client (including LangChain, n8n, etc.) to trigger local tools automatically.
+
+Example using the OpenAI SDK:
+
+```python
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dolar_rate",
+            "description": "Get the current USD to VEF exchange rate.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    }
+]
+
+resp = client.chat.completions.create(
+    model="deepseek-chat",
+    messages=[{"role": "user", "content": "What is the current dollar rate?"}],
+    tools=tools
+)
+
+# If the model requested the tool:
+message = resp.choices[0].message
+if message.tool_calls:
+    for tc in message.tool_calls:
+        print(f"Tool request: {tc.function.name} with args {tc.function.arguments}")
+```
 
 ---
 
@@ -269,7 +363,7 @@ yourself.
 - **Sign in once, then reuse.** The cached session refreshes automatically; you only re-sign-in if it fully expires.
 - **Be reasonable.** Please use it in moderation, and don't spam or hammer it with automated bulk requests.
 - **No real token counts.** `usage` in responses is a rough ~4-chars/token estimate.
-- **Most OpenAI params are accepted but ignored** (`temperature`, `top_p`, `max_tokens`); only `model`, `messages`, `stream`, `conversation_id`, `thinking`, and `search` do anything.
+- **Most OpenAI params are accepted but ignored** (`temperature`, `top_p`, `max_tokens`); only `model`, `messages`, `stream`, `conversation_id`, `thinking`, `search`, and `tools` do anything.
 - **Vision is deferred.** It needs image-upload plumbing that isn't built yet.
 - **Your session is private.** Everything in `session/` (cookies + token) stays on your machine and is git-ignored.
 
