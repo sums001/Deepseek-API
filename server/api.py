@@ -141,4 +141,6 @@ async def chat_completions(req: ChatCompletionRequest):
     except Exception as e:
         return _error(f"DeepSeek request failed: {e}")
 
-    return completion_response(req.model, reply.text, prompt, reply.conversation_id)
+    return completion_response(req.model, reply.text, prompt,
+                              reply.conversation_id, reply.reasoning_text,
+                              reply.citations)

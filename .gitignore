@@ -9,3 +9,4 @@ session
 *.env.*
 !.env.example
 CLAUDE.md
+shell.nix

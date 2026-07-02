@@ -3,6 +3,10 @@
 DeepSeek's protocol has no system/role channel — just a single `prompt` string.
 So we flatten the OpenAI `messages` array into one prompt, and wrap DeepSeek's
 text output back into OpenAI response/stream objects.
+
+The client's stream yields ``(type, text)`` tuples where *type* is ``"thinking"``
+or ``"content"``.  Thinking text is mapped to OpenAI's ``reasoning_content``
+delta field; regular content maps to ``content``.
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from .schemas import ChatMessage
 
@@ -62,14 +66,20 @@ def _est_tokens(text: str) -> int:
 
 
 def completion_response(model: str, content: str, prompt: str,
-                        conversation_id: str = None) -> dict:
+                        conversation_id: str = None,
+                        reasoning_content: Optional[str] = None,
+                        citations: Optional[list] = None) -> dict:
     """A full (non-streaming) OpenAI chat.completion object.
 
-    `conversation_id` is an extra top-level field (outside OpenAI's schema) you
-    send back to resume the conversation.
+    `conversation_id` and `citations` are extra top-level fields (outside
+    OpenAI's schema) that the caller can use to resume the conversation or
+    display search-result sources.
     """
     pt, ct = _est_tokens(prompt), _est_tokens(content)
-    return {
+    message: dict = {"role": "assistant", "content": content}
+    if reasoning_content:
+        message["reasoning_content"] = reasoning_content
+    result = {
         "id": _id(),
         "object": "chat.completion",
         "created": _now(),
@@ -78,7 +88,7 @@ def completion_response(model: str, content: str, prompt: str,
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": message,
                 "finish_reason": "stop",
             }
         ],
@@ -88,15 +98,22 @@ def completion_response(model: str, content: str, prompt: str,
             "total_tokens": pt + ct,
         },
     }
+    if citations:
+        result["citations"] = citations
+    return result
 
 
-def stream_chunks(model: str, stream: Iterable[str]) -> Iterable[str]:
-    """Yield OpenAI SSE lines (`data: {...}\\n\\n`) for a streamed completion.
+def stream_chunks(model: str, stream: Iterable[tuple[str, str]]) -> Iterable[str]:
+    """Yield OpenAI SSE lines (``data: {...}\\n\\n``) for a streamed completion.
 
-    `stream` is the client's stream object; after it's consumed we read its
-    `.conversation_id` and attach it to the final chunk.
+    *stream* is the client's stream yielding ``(type, text)`` tuples where
+    *type* is ``"thinking"`` or ``"content"``.  Thinking text becomes
+    ``reasoning_content`` in the delta; regular text becomes ``content``.
+    After the stream is consumed we read its ``.conversation_id`` and attach
+    it to the final chunk.
     """
     cid, created = _id(), _now()
+    role_sent = False
 
     def frame(delta: dict, finish=None, extra: dict = None) -> str:
         obj = {
@@ -110,11 +127,22 @@ def stream_chunks(model: str, stream: Iterable[str]) -> Iterable[str]:
             obj.update(extra)
         return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
-    # First frame announces the assistant role.
-    yield frame({"role": "assistant", "content": ""})
-    for d in stream:
-        if d:
-            yield frame({"content": d})
+    for chunk_type, text in stream:
+        if not text:
+            continue
+        if chunk_type == "thinking":
+            delta = {"reasoning_content": text}
+        else:
+            delta = {"content": text}
+        if not role_sent:
+            delta["role"] = "assistant"
+            role_sent = True
+        yield frame(delta)
+
     conversation_id = getattr(stream, "conversation_id", None)
-    yield frame({}, finish="stop", extra={"conversation_id": conversation_id})
+    citations = getattr(stream, "citations", None)
+    final_extra = {"conversation_id": conversation_id}
+    if citations:
+        final_extra["citations"] = citations
+    yield frame({}, finish="stop", extra=final_extra)
     yield "data: [DONE]\n\n"
