@@ -62,13 +62,16 @@ def _est_tokens(text: str) -> int:
 
 
 def completion_response(model: str, content: str, prompt: str,
-                        conversation_id: str = None) -> dict:
+                        conversation_id: str = None, reasoning_content: str = None) -> dict:
     """A full (non-streaming) OpenAI chat.completion object.
 
     `conversation_id` is an extra top-level field (outside OpenAI's schema) you
     send back to resume the conversation.
     """
     pt, ct = _est_tokens(prompt), _est_tokens(content)
+    message = {"role": "assistant", "content": content}
+    if reasoning_content:
+        message["reasoning_content"] = reasoning_content
     return {
         "id": _id(),
         "object": "chat.completion",
@@ -78,7 +81,7 @@ def completion_response(model: str, content: str, prompt: str,
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": message,
                 "finish_reason": "stop",
             }
         ],
@@ -114,7 +117,11 @@ def stream_chunks(model: str, stream: Iterable[str]) -> Iterable[str]:
     yield frame({"role": "assistant", "content": ""})
     for d in stream:
         if d:
-            yield frame({"content": d})
+            chunk_type = getattr(d, "chunk_type", "RESPONSE")
+            if chunk_type == "THINK":
+                yield frame({"reasoning_content": d})
+            else:
+                yield frame({"content": d})
     conversation_id = getattr(stream, "conversation_id", None)
     yield frame({}, finish="stop", extra={"conversation_id": conversation_id})
     yield "data: [DONE]\n\n"
