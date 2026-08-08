@@ -112,7 +112,7 @@ async def chat_completions(req: ChatCompletionRequest):
     # A thread's model is fixed when it's created, so on resume we ignore `model`
     # (the OpenAI SDK always sends one) and let the existing thread's model stand.
     model_type = None if req.conversation_id else resolve_model_type(req.model)
-    prompt = messages_to_prompt(req.messages)
+    prompt = messages_to_prompt(req.messages, tools=req.tools)
 
     try:
         # Off the event loop: get_client() uses Playwright's sync API, which
