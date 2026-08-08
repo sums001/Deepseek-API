@@ -59,12 +59,20 @@ def _decode_cid(conversation_id: Optional[str]) -> tuple[Optional[str], Optional
     return (session_id or None), parent
 
 
+class Chunk(str):
+    def __new__(cls, value: str, chunk_type: str):
+        obj = str.__new__(cls, value)
+        obj.chunk_type = chunk_type
+        return obj
+
+
 @dataclass
 class Reply:
     """A completed chat reply plus the id to resume the conversation."""
 
     text: str
     conversation_id: str
+    reasoning_text: Optional[str] = None
 
     def __str__(self) -> str:  # so print(reply) shows the text
         return self.text
@@ -179,8 +187,16 @@ class DeepSeekClient:
         """Return the complete reply (`.text`) plus its `.conversation_id`."""
         s = self.stream(prompt, conversation_id=conversation_id,
                         model=model, thinking=thinking, search=search)
-        text = "".join(s)
-        return Reply(text=text, conversation_id=s.conversation_id)
+        reasoning_chunks = []
+        content_chunks = []
+        for chunk in s:
+            if getattr(chunk, "chunk_type", None) == "THINK":
+                reasoning_chunks.append(chunk)
+            else:
+                content_chunks.append(chunk)
+        text = "".join(content_chunks)
+        reasoning_text = "".join(reasoning_chunks) if reasoning_chunks else None
+        return Reply(text=text, conversation_id=s.conversation_id, reasoning_text=reasoning_text)
 
     def close(self) -> None:
         self._http.close()
@@ -202,7 +218,7 @@ class _Stream:
         self._search = search
         self._message_id: Optional[int] = None
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> Iterator[Chunk]:
         body = {
             "chat_session_id": self._session_id,
             "parent_message_id": self._parent_id,
@@ -223,7 +239,8 @@ class _Stream:
             "POST", COMPLETION_PATH, json=body, headers=headers
         ) as resp:
             resp.raise_for_status()
-            yield from _parse_sse(resp.iter_lines(), meta)
+            for chunk_type, text in _parse_sse(resp.iter_lines(), meta):
+                yield Chunk(text, chunk_type)
         if meta.get("message_id") is not None:
             self._message_id = meta["message_id"]
 
@@ -232,21 +249,35 @@ class _Stream:
         return _encode_cid(self._session_id, self._message_id)
 
 
-def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
-    """Turn DeepSeek's SSE completion stream into reply-text deltas.
+def _find_fragments(data) -> Iterator[dict]:
+    """Recursively yield all fragment dicts containing 'type' and 'id'."""
+    if isinstance(data, dict):
+        if "type" in data and "id" in data:
+            yield data
+        else:
+            for val in data.values():
+                yield from _find_fragments(val)
+    elif isinstance(data, list):
+        for item in data:
+            yield from _find_fragments(item)
+
+
+def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[tuple[str, str]]:
+    """Turn DeepSeek's SSE completion stream into (chunk_type, text) tuples.
 
     The stream sends an initial snapshot frame whose `v` is the full response
     object (with `fragments[].content`), then a series of append frames:
       * {"p":"response/fragments/-1/content","o":"APPEND","v":" what"}  (sets path)
       * {"v":"'s"}                                                       (appends to it)
-    We track the active append path and emit only RESPONSE-fragment text.
+    We track the active append path and emit fragment text for all fragments (THINK, RESPONSE, etc.).
 
     If `meta` is given, the assistant's `message_id` is recorded into it (used to
     build the resumable conversation_id). The exact field location can vary, so
     we look in a few plausible spots defensively.
     """
     active_path: Optional[str] = None
-    emitted_initial = False
+    active_type: str = "RESPONSE"
+    processed_fragments = set()
 
     for line in lines:
         if not line or not line.startswith("data:"):
@@ -261,32 +292,33 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
 
         v = obj.get("v")
 
-        # Snapshot frame: full response object.
+        # Snapshot frame: capture message ID.
         if isinstance(v, dict) and "response" in v:
             if meta is not None:
                 _capture_message_id(meta, v)
-            for frag in v["response"].get("fragments", []):
-                if frag.get("type") == "RESPONSE" and frag.get("content"):
-                    active_path = "response/fragments/-1/content"
-                    if not emitted_initial:
-                        emitted_initial = True
-                        yield frag["content"]
-            continue
 
-        # Path-setting append frame.
+        # Update active path if path is specified.
         if "p" in obj:
             active_path = obj["p"]
             if meta is not None and active_path.endswith("message_id") \
                     and isinstance(v, int):
                 meta["message_id"] = v
-            if obj.get("o") == "APPEND" and isinstance(v, str) \
-                    and active_path.endswith("content"):
-                yield v
-            continue
 
-        # Bare append to the current path.
+        # Process any new fragments found in the object.
+        for frag in _find_fragments(obj):
+            frag_id = frag.get("id")
+            frag_type = frag.get("type")
+            content = frag.get("content")
+            if frag_id not in processed_fragments:
+                processed_fragments.add(frag_id)
+                if frag_type:
+                    active_type = frag_type
+                if content:
+                    yield active_type, content
+
+        # Yield any text updates to content.
         if isinstance(v, str) and active_path and active_path.endswith("content"):
-            yield v
+            yield active_type, v
 
 
 def _capture_message_id(meta: dict, snapshot: dict) -> None:
