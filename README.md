@@ -152,13 +152,17 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
-**Endpoints**
+**Endpoints** (both `/v1/...` and root `/...` supported)
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/v1/chat/completions` | Chat (supports `"stream": true`, plus optional `"conversation_id"`, `"thinking"`, `"search"`) |
-| `GET`  | `/v1/models` | Lists the available models |
-| `GET`  | `/healthz` | Health check (rate-limit exempt) |
+| `POST` | `/v1/chat/completions` or `/chat/completions` | Chat completions (stream, full OpenAI schema, thinking, search) |
+| `GET`  | `/v1/models` or `/models` | Lists available models and aliases (`deepseek-chat`, `gpt-4o`, etc.) |
+| `GET`  | `/v1/models/{model}` or `/models/{model}` | Retrieve single model details |
+| `POST` | `/v1/embeddings` or `/embeddings` | OpenAI-compatible embedding fallback |
+| `GET`  | `/healthz` or `/` | Health check |
+
+> Point your OpenAI client base URL to either `http://localhost:8000/v1` or `http://localhost:8000`. Both will route seamlessly.
 
 > Change the address with env vars: `HOST=0.0.0.0 PORT=8080 python app.py`, or run `uvicorn server.api:app --host 0.0.0.0 --port 8080`.
 
