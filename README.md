@@ -172,6 +172,43 @@ curl http://localhost:8000/v1/chat/completions \
 python -m deepseek.auth          # sign in and save the session
 ```
 
+## OrcaRouter (optional second provider)
+
+Besides your own DeepSeek session, the server can answer through
+[OrcaRouter](https://www.orcarouter.ai), an OpenAI-compatible AI gateway that
+routes many providers behind one endpoint. It is independent of the DeepSeek
+bridge: nothing above changes, and you can use either, or both.
+
+There are **two ways in**, separately usable, both ending in an ordinary
+OrcaRouter API key that belongs to you:
+
+```bash
+python -m server.orcarouter key        # paste an existing sk-orca-... key
+python -m server.orcarouter connect    # sign in: OAuth 2.0 + PKCE, no client secret
+```
+
+`ORCAROUTER_API_KEY` in the environment or `.env` works too.
+
+Then name an OrcaRouter model on the same endpoint:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "deepseek/deepseek-v4-pro",
+       "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+A model routes to OrcaRouter when it is prefixed with `orcarouter:` or when the
+live OrcaRouter catalog advertises that id; anything else keeps using the
+DeepSeek bridge. `GET /v1/models` lists both. The model list is read from
+`GET https://api.orcarouter.ai/v1/models` and filtered per entry point by what
+each record actually declares (endpoint types and input modalities), and a
+discovery outage falls back to a small verified seed that is reported as
+degraded rather than turned into a free-text field.
+
+Full details — the two flows, the origins, the credential lifecycle, and the
+model rules — are in [docs/orcarouter.md](docs/orcarouter.md).
+
 ---
 
 ## Human-check & proof-of-work (automatic)
@@ -259,6 +296,7 @@ yourself.
 | --- | --- |
 | [deepseek/](deepseek/) | The core library: `DeepSeekClient`, auth/browser sign-in ([auth.py](deepseek/auth.py)), the HTTP driver ([client.py](deepseek/client.py)), and the PoW solver ([pow.py](deepseek/pow.py)) |
 | [server/](server/) | The FastAPI OpenAI-compatible server |
+| [server/orcarouter/](server/orcarouter/) | The optional OrcaRouter provider: endpoints, PKCE connect flow, credentials, model catalog, inference adapter, and CLI ([docs/orcarouter.md](docs/orcarouter.md)) |
 | [examples/](examples/) | Runnable examples for every feature ([examples/README.md](examples/README.md)) |
 | [app.py](app.py) | Starts the server |
 

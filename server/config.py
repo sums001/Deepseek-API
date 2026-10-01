@@ -30,6 +30,33 @@ MODEL_MAP = {
 DEFAULT_MODEL = "deepseek-chat"
 
 
+# --- OrcaRouter provider ----------------------------------------------------
+#
+# A second, independent provider alongside the DeepSeek bridge. OrcaRouter is
+# an OpenAI-compatible AI gateway that routes many providers behind one
+# endpoint; its origins, credential handling, connect flow, and model catalog
+# live in `server.orcarouter`. Only the routing names belong here, next to the
+# existing model registry.
+#
+# Clients select it either by the explicit `orcarouter:<model>` prefix or by an
+# id advertised by the live OrcaRouter catalog (a `vendor/model` namespace,
+# which can never collide with the DeepSeek ids above because those carry no
+# slash).
+ORCAROUTER_PROVIDER = "orcarouter"
+ORCAROUTER_MODEL_PREFIX = "orcarouter:"
+ORCAROUTER_DEFAULT_MODEL = "orcarouter/auto"
+
+
+def is_orcarouter_model(name: str) -> bool:
+    """Whether a request named the OrcaRouter provider explicitly."""
+    return bool(name) and name.startswith(ORCAROUTER_MODEL_PREFIX)
+
+
+def strip_orcarouter_prefix(name: str) -> str:
+    """`orcarouter:vendor/model` -> `vendor/model` (namespace preserved)."""
+    return name[len(ORCAROUTER_MODEL_PREFIX):] if is_orcarouter_model(name) else name
+
+
 def is_known_model(name: str) -> bool:
     """Whether `name` is a model id we accept (used to 404 unknown models)."""
     return name in MODEL_MAP
