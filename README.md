@@ -6,10 +6,24 @@ You can use it in two ways:
 
 - 🐍 **As a Python library:** just call `client.chat("Hi")`. Supports streaming and multi-turn conversations.
 - 🔌 **As a local OpenAI-compatible API:** runs a server at `http://localhost:8000/v1` that speaks the OpenAI format, so the official `openai` SDK (and any OpenAI-compatible app) works as a drop-in, with `localhost` in place of OpenAI.
+- 🧰 **With tool / function calling:** pass OpenAI-style `tools` and get standard `tool_calls` back — enough for agent loops, function calling, and structured tool use.
 
 You sign in once in a browser with your DeepSeek account; your session is saved and refreshed automatically after that.
 
 > **Unofficial project.** Not affiliated with or endorsed by DeepSeek. It automates the consumer DeepSeek web experience for personal use, so use it responsibly and within DeepSeek's terms.
+
+---
+
+## Status
+
+| Area | State |
+| --- | --- |
+| Python library (`deepseek/`) | Stable — chat, streaming, conversations |
+| OpenAI-compatible server (`server/`) | Stable — `/v1/chat/completions`, `/v1/models`, `/healthz` |
+| Tool / function calling | **New** — prompt-based shim (see below) |
+| DeepThink & web search toggles | Stable |
+| Vision / image input | Deferred |
+| Automated test suite | None yet |
 
 ---
 
@@ -20,6 +34,7 @@ You sign in once in a browser with your DeepSeek account; your session is saved 
 - [Setup (2 minutes)](#setup-2-minutes)
 - [Usage 1: In Python (no server)](#usage-1-in-python-no-server)
 - [Usage 2: As an OpenAI-compatible server](#usage-2-as-an-openai-compatible-server)
+- [Tool / function calling](#tool--function-calling)
 - [Command line](#command-line)
 - [Human-check & proof-of-work (automatic)](#human-check--proof-of-work-automatic)
 - [Models, DeepThink & web search](#models-deepthink--web-search)
@@ -27,6 +42,7 @@ You sign in once in a browser with your DeepSeek account; your session is saved 
 - [Rate limiting](#rate-limiting)
 - [Project layout](#project-layout)
 - [Notes & limitations](#notes--limitations)
+- [Status](#status)
 - [License](#license)
 
 ---
@@ -36,6 +52,7 @@ You sign in once in a browser with your DeepSeek account; your session is saved 
 - **Free:** uses your normal signed-in DeepSeek account, no API billing.
 - **Drop-in OpenAI replacement:** point any OpenAI client at `localhost` and it just works.
 - **Full DeepSeek toolset:** pick the fast or expert model, and toggle DeepThink reasoning and web search per request.
+- **Tool calling:** pass OpenAI `tools` / `tool_choice` and receive standard `tool_calls` responses.
 - **Streaming + conversations:** token-by-token output and multi-turn threads addressed by `conversation_id`.
 
 ---
@@ -156,13 +173,85 @@ curl http://localhost:8000/v1/chat/completions \
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/v1/chat/completions` | Chat (supports `"stream": true`, plus optional `"conversation_id"`, `"thinking"`, `"search"`) |
+| `POST` | `/v1/chat/completions` | Chat (supports `"stream": true`, optional `"conversation_id"`, `"thinking"`, `"search"`, and `"tools"` / `"tool_choice"`) |
 | `GET`  | `/v1/models` | Lists the available models |
 | `GET`  | `/healthz` | Health check (rate-limit exempt) |
 
 > Change the address with env vars: `HOST=0.0.0.0 PORT=8080 python app.py`, or run `uvicorn server.api:app --host 0.0.0.0 --port 8080`.
 
 👉 More: [examples/04_server_http.py](examples/04_server_http.py), [examples/05_server_stream.py](examples/05_server_stream.py), [examples/06_server_openai_sdk.py](examples/06_server_openai_sdk.py)
+
+---
+
+## Tool / function calling
+
+The server accepts OpenAI-style tool definitions and returns OpenAI-style
+`tool_calls`, so the standard function-calling loop works:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}]
+
+resp = client.chat.completions.create(
+    model="deepseek-chat",
+    messages=[{"role": "user", "content": "What's the weather in Auckland?"}],
+    tools=tools,
+    tool_choice="auto",
+)
+
+msg = resp.choices[0].message
+if msg.tool_calls:
+    call = msg.tool_calls[0]
+    print(call.function.name, call.function.arguments)   # -> get_weather {"city": "Auckland"}
+
+    # Send the tool result back to continue the loop
+    follow = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "user", "content": "What's the weather in Auckland?"},
+            msg,
+            {"role": "tool", "tool_call_id": call.id, "content": '{"temp_c": 18, "sky": "cloudy"}'},
+        ],
+        tools=tools,
+    )
+    print(follow.choices[0].message.content)
+```
+
+### How it works
+
+DeepSeek's web protocol has **no native tool-call channel** — only a single
+`prompt` string. So the server implements a *shim* (see
+[server/openai_format.py](server/openai_format.py)):
+
+1. Your `tools` are rendered into a prompt instruction asking the model to
+   reply with a JSON block `{"tool_calls": [{"name": ..., "arguments": {...}}]}`.
+2. The model's text is scanned for that JSON block and translated into OpenAI's
+   `tool_calls` shape — `content` becomes `null` and `finish_reason` is
+   `"tool_calls"`.
+3. `tool`-role result messages and prior assistant `tool_calls` are serialised
+   back into the flattened prompt so multi-turn tool conversations work.
+
+`tool_choice` is honoured as a prompt-level hint: `"none"` (never call),
+`"required"` (must call one), or `{"type": "function", "function": {"name": ...}}`
+(force a specific function). `"auto"` is the default behaviour.
+
+> **Reliability caveat.** Because this is prompt-driven rather than a native
+> tool API, the model may occasionally emit a tool call as prose or malformed
+> JSON. Parse defensively and keep prompts explicit.
 
 ---
 
@@ -213,10 +302,10 @@ resp = client.chat.completions.create(
 )
 ```
 
-`conversation_id`, `thinking`, and `search` are non-OpenAI extras. A thread's
-model is fixed at creation, so `model` can't be combined with `conversation_id`
-on resume. Unknown model names return a `404` (no silent fallback). See
-[server/config.py](server/config.py).
+`conversation_id`, `thinking`, `search`, `tools`, and `tool_choice` are
+non-OpenAI extras. A thread's model is fixed at creation, so `model` can't be
+combined with `conversation_id` on resume. Unknown model names return a `404`
+(no silent fallback). See [server/config.py](server/config.py).
 
 ---
 
@@ -258,7 +347,7 @@ yourself.
 | Path | What it does |
 | --- | --- |
 | [deepseek/](deepseek/) | The core library: `DeepSeekClient`, auth/browser sign-in ([auth.py](deepseek/auth.py)), the HTTP driver ([client.py](deepseek/client.py)), and the PoW solver ([pow.py](deepseek/pow.py)) |
-| [server/](server/) | The FastAPI OpenAI-compatible server |
+| [server/](server/) | The FastAPI OpenAI-compatible server — request/response schemas ([schemas.py](server/schemas.py)), OpenAI↔DeepSeek translation incl. tool calling ([openai_format.py](server/openai_format.py)), endpoints ([api.py](server/api.py)), config ([config.py](server/config.py)), rate limiting ([ratelimit.py](server/ratelimit.py)) |
 | [examples/](examples/) | Runnable examples for every feature ([examples/README.md](examples/README.md)) |
 | [app.py](app.py) | Starts the server |
 
@@ -269,13 +358,13 @@ yourself.
 - **Sign in once, then reuse.** The cached session refreshes automatically; you only re-sign-in if it fully expires.
 - **Be reasonable.** Please use it in moderation, and don't spam or hammer it with automated bulk requests.
 - **No real token counts.** `usage` in responses is a rough ~4-chars/token estimate.
-- **Most OpenAI params are accepted but ignored** (`temperature`, `top_p`, `max_tokens`); only `model`, `messages`, `stream`, `conversation_id`, `thinking`, and `search` do anything.
+- **Tool calling is a shim.** It's prompt-driven, not a native tool API — parse responses defensively. See [Tool / function calling](#tool--function-calling).
+- **Most other OpenAI params are accepted but ignored** (`temperature`, `top_p`, `max_tokens`); only `model`, `messages`, `stream`, `conversation_id`, `thinking`, `search`, `tools`, and `tool_choice` do anything.
 - **Vision is deferred.** It needs image-upload plumbing that isn't built yet.
 - **Your session is private.** Everything in `session/` (cookies + token) stays on your machine and is git-ignored.
+
+---
 
 ## License
 
 Released under the [MIT License](LICENSE). As this is an unofficial project, you remain responsible for complying with DeepSeek's terms of service.
-
----
-

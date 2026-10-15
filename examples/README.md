@@ -24,6 +24,7 @@ Start the server first in another terminal: `python app.py`
 | [04_server_http.py](04_server_http.py) | Plain HTTP with `requests` (multi-turn via `messages`) |
 | [05_server_stream.py](05_server_stream.py) | Streaming over Server-Sent Events |
 | [06_server_openai_sdk.py](06_server_openai_sdk.py) | The official `openai` SDK (`pip install openai`) |
+| [07_server_tool_calls.py](07_server_tool_calls.py) | Tool / function calling — pass `tools`, receive `tool_calls`, send results back |
 
 The server limits requests per client IP (default 30/min, set via
 `RATE_LIMIT_PER_MINUTE`); over the limit you get HTTP `429` with a `Retry-After`
@@ -33,3 +34,8 @@ The `model` name selects the model — `deepseek-chat` (fast) or `deepseek-exper
 (stronger, slower); see [server/config.py](../server/config.py). DeepThink and web
 search are separate toggles, requested via the `thinking` and `search` booleans in
 the request body — or through `extra_body` with the OpenAI SDK.
+
+Tool calling is a prompt-based shim (DeepSeek has no native tool channel), so the
+model can occasionally return a call as prose or malformed JSON. Parse
+defensively. See [07_server_tool_calls.py](07_server_tool_calls.py) for the full
+loop.

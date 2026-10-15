@@ -39,7 +39,12 @@ from .config import (
     is_known_model,
     resolve_model_type,
 )
-from .openai_format import completion_response, messages_to_prompt, stream_chunks
+from .openai_format import (
+    completion_response,
+    messages_to_prompt,
+    parse_tool_calls,
+    stream_chunks,
+)
 from .ratelimit import RateLimiter, install_rate_limit
 from .schemas import ChatCompletionRequest
 
@@ -112,7 +117,9 @@ async def chat_completions(req: ChatCompletionRequest):
     # A thread's model is fixed when it's created, so on resume we ignore `model`
     # (the OpenAI SDK always sends one) and let the existing thread's model stand.
     model_type = None if req.conversation_id else resolve_model_type(req.model)
-    prompt = messages_to_prompt(req.messages)
+    prompt = messages_to_prompt(
+        req.messages, tools=req.tools, tool_choice=req.tool_choice
+    )
 
     try:
         # Off the event loop: get_client() uses Playwright's sync API, which
@@ -129,7 +136,7 @@ async def chat_completions(req: ChatCompletionRequest):
                 prompt, conversation_id=req.conversation_id,
                 model=model_type, thinking=req.thinking, search=req.search,
             )
-            yield from stream_chunks(req.model, stream)
+            yield from stream_chunks(req.model, stream, prompt=prompt)
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -141,4 +148,9 @@ async def chat_completions(req: ChatCompletionRequest):
     except Exception as e:
         return _error(f"DeepSeek request failed: {e}")
 
-    return completion_response(req.model, reply.text, prompt, reply.conversation_id)
+    # Parse the model's text output for a JSON tool-call block and translate
+    # it into OpenAI's tool_calls shape if present.
+    tool_calls = parse_tool_calls(reply.text)
+    return completion_response(
+        req.model, reply.text, prompt, reply.conversation_id, tool_calls=tool_calls
+    )
