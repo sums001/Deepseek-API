@@ -1,0 +1,27 @@
+services:
+  deepseek-api:
+    build: .
+    image: deepseek-api
+    ports:
+      # Published on localhost only: the API has no auth of its own. Use
+      # "8000:8000" to reach it from other machines on your network.
+      - "127.0.0.1:8000:8000"
+    environment:
+      # Bind inside the container; the host port is set under `ports` above.
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      # No display in the container, so never open a login window (see Dockerfile).
+      SERVER_INTERACTIVE_LOGIN: "0"
+      # Self-imposed rate limit (see server/config.py). Tune to your account.
+      RATE_LIMIT_PER_MINUTE: "30"
+    volumes:
+      # Persist the signed-in browser profile + cached session across restarts.
+      # Sign in once on the host (`python -m deepseek.auth`) so this folder is
+      # populated; the container only does the headless session refresh.
+      - ./session:/app/session
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped

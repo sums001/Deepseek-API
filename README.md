@@ -20,6 +20,7 @@ You sign in once in a browser with your DeepSeek account; your session is saved 
 - [Setup (2 minutes)](#setup-2-minutes)
 - [Usage 1: In Python (no server)](#usage-1-in-python-no-server)
 - [Usage 2: As an OpenAI-compatible server](#usage-2-as-an-openai-compatible-server)
+- [Run with Docker (optional)](#run-with-docker-optional)
 - [Command line](#command-line)
 - [Human-check & proof-of-work (automatic)](#human-check--proof-of-work-automatic)
 - [Models, DeepThink & web search](#models-deepthink--web-search)
@@ -166,6 +167,28 @@ curl http://localhost:8000/v1/chat/completions \
 
 ---
 
+## Run with Docker (optional)
+
+Prefer a container? You can run the OpenAI-compatible server in Docker once you've signed in.
+
+**Sign in on the host first.** The login step above opens a *visible* browser, which can't run inside the headless container, so run `python -m deepseek.auth` on your host to populate `session/`. The container mounts that folder, reuses the saved session and refreshes it headlessly from the saved browser profile. If it can't (it answers `503 login_required`), re-run `python -m deepseek.auth` on the host and restart the container.
+
+```bash
+docker compose up --build
+# -> DeepSeek OpenAI-compatible API on http://localhost:8000
+```
+
+The [docker-compose.yml](docker-compose.yml) publishes port `8000` on `localhost` only (the API has no auth of its own; change it to `"8000:8000"` to expose it on your network) and bind-mounts your `session/` so the login persists across restarts. Tune `RATE_LIMIT_PER_MINUTE` there. Your session is never baked into the image: [.dockerignore](.dockerignore) keeps `session/` and `.env` out. To run without Compose, build and pass the same bindings by hand:
+
+```bash
+docker build -t deepseek-api .
+docker run --rm -p 127.0.0.1:8000:8000 -v "$(pwd)/session:/app/session" deepseek-api
+```
+
+> On Windows PowerShell use `-v "${PWD}/session:/app/session"`.
+
+---
+
 ## Command line
 
 ```bash
@@ -262,6 +285,7 @@ yourself.
 | [server/](server/) | The FastAPI OpenAI-compatible server |
 | [examples/](examples/) | Runnable examples for every feature ([examples/README.md](examples/README.md)) |
 | [app.py](app.py) | Starts the server |
+| [Dockerfile](Dockerfile), [docker-compose.yml](docker-compose.yml) | Run the server in a container ([details](#run-with-docker-optional)) |
 
 ---
 

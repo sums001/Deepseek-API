@@ -1,0 +1,13 @@
+.git
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+examples/
+CLAUDE.md
+# Keep secrets out of the built image. Compose bind-mounts ./session back in at
+# runtime, so the server still sees it; settings go in compose's `environment`.
+session/
+session.json
+.env
+*.env.*
