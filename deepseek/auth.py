@@ -24,9 +24,12 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, Optional
 
+from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
+# Load .env before reading settings below, whichever entry point imported us.
+load_dotenv(ROOT / ".env")
 # Override with DEEPSEEK_PROFILE_DIR to reuse an existing signed-in Chrome profile.
 DEFAULT_PROFILE_DIR = Path(os.getenv("DEEPSEEK_PROFILE_DIR", ROOT / "session" / "profile"))
 DEFAULT_SESSION_FILE = ROOT / "session" / "session.json"
@@ -182,7 +185,7 @@ def login(
         existing = None
         if not assume_logged_out:
             _safe_goto(page, CHAT_URL)
-            existing = page.evaluate(_READ_TOKEN_JS)
+            existing = _safe_evaluate(page, _READ_TOKEN_JS)
 
         if not existing:
             _safe_goto(page, SIGNIN_URL)

@@ -6,4 +6,6 @@ uvicorn[standard]>=0.30 # ASGI server
 pydantic>=2.7           # request/response models
 python-dotenv>=1.0      # load credentials from .env
 wasmtime>=21.0          # runs DeepSeek's PoW WASM module (deepseek/pow.py)
-openai
+
+# --- Examples only ---
+openai>=1.0             # used by examples/06_server_openai_sdk.py
