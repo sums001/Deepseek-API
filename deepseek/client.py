@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterator, Optional
 
 import httpx
@@ -38,6 +39,14 @@ COMPLETION_PATH = "/api/v0/chat/completion"
 # Instant (the fast model); "expert" is the stronger, slower model. Omitting the
 # field lets the backend pick, so we always send one explicitly.
 DEFAULT_MODEL_TYPE = "default"
+
+# Fragment types in the completion stream: DeepThink reasoning vs. the reply.
+THINK = "THINK"
+RESPONSE = "RESPONSE"
+
+# Envelope `code` DeepSeek returns (with HTTP 200) when the bearer token is
+# rejected: {"code":40003,"msg":"Authorization Failed (invalid token)"}.
+_AUTH_ERROR_CODES = {40003}
 
 # A conversation_id is an opaque "<chat_session_id>:<last_message_id>" token. It
 # carries everything needed to resume a thread, so the client stays stateless.
@@ -61,10 +70,12 @@ def _decode_cid(conversation_id: Optional[str]) -> tuple[Optional[str], Optional
 
 @dataclass
 class Reply:
-    """A completed chat reply plus the id to resume the conversation."""
+    """A completed chat reply plus the id to resume the conversation.
+    `reasoning` holds the DeepThink text (empty unless `thinking` was on)."""
 
     text: str
     conversation_id: str
+    reasoning: str = ""
 
     def __str__(self) -> str:  # so print(reply) shows the text
         return self.text
@@ -80,6 +91,16 @@ def _biz(data: dict) -> dict:
     return biz
 
 
+def _auth_failed(r: httpx.Response) -> bool:
+    """Whether DeepSeek rejected our token (HTTP 401 or an auth error envelope)."""
+    if r.status_code == 401:
+        return True
+    try:
+        return r.json().get("code") in _AUTH_ERROR_CODES
+    except ValueError:
+        return False
+
+
 class DeepSeekClient:
     def __init__(
         self,
@@ -89,7 +110,9 @@ class DeepSeekClient:
         # `allow_interactive=False` makes session resolution non-blocking: it
         # uses a cached/headless session and raises LoginRequired instead of
         # opening a browser window. The server passes False (see server/api.py).
+        self._allow_interactive = allow_interactive
         self.session = session or get_session(allow_interactive=allow_interactive)
+        self._session_lock = threading.Lock()
         self._pow = DeepSeekPow()
         # The wasmtime Store behind the PoW solver is not reentrant; serialise
         # access so concurrent server requests don't corrupt it.
@@ -114,22 +137,44 @@ class DeepSeekClient:
             "x-client-platform": "web",
             "x-client-locale": "en_US",
             "x-client-bundle-id": "com.deepseek.chat",
-            "x-client-timezone-offset": "19800",
+            "x-client-timezone-offset": str(
+                int(datetime.now().astimezone().utcoffset().total_seconds())
+            ),
         }
+
+    def refresh_session(self, stale_token: Optional[str] = None) -> None:
+        """Recapture the session from the browser profile, bypassing the cached
+        file, and point the HTTP client at it. Called when DeepSeek rejects the
+        token; `stale_token` lets concurrent callers skip a refresh another
+        thread already did."""
+        with self._session_lock:
+            if stale_token is not None and self.session.token != stale_token:
+                return
+            self.session = get_session(max_age=0, allow_interactive=self._allow_interactive)
+            self._http.headers.update(self._base_headers())
+            self._http.cookies.update(self.session.cookies)
+
+    def _post(self, path: str, body: dict) -> dict:
+        """POST to an API endpoint and unwrap its `biz_data`. If the token was
+        rejected, refresh the session once and retry, so a long-running server
+        survives token expiry without a restart."""
+        token = self.session.token
+        r = self._http.post(path, json=body)
+        if _auth_failed(r):
+            self.refresh_session(stale_token=token)
+            r = self._http.post(path, json=body)
+        r.raise_for_status()
+        return _biz(r.json())
 
     # --- protocol steps -----------------------------------------------------
 
     def create_chat_session(self) -> str:
-        r = self._http.post("/api/v0/chat_session/create", json={})
-        r.raise_for_status()
-        return _biz(r.json())["chat_session"]["id"]
+        return self._post("/api/v0/chat_session/create", {})["chat_session"]["id"]
 
     def _pow_header(self, target_path: str = COMPLETION_PATH) -> str:
-        r = self._http.post(
-            "/api/v0/chat/create_pow_challenge", json={"target_path": target_path}
-        )
-        r.raise_for_status()
-        challenge = _biz(r.json())["challenge"]
+        challenge = self._post(
+            "/api/v0/chat/create_pow_challenge", {"target_path": target_path}
+        )["challenge"]
         with self._pow_lock:
             return self._pow.make_header(challenge)
 
@@ -179,16 +224,23 @@ class DeepSeekClient:
         """Return the complete reply (`.text`) plus its `.conversation_id`."""
         s = self.stream(prompt, conversation_id=conversation_id,
                         model=model, thinking=thinking, search=search)
-        text = "".join(s)
-        return Reply(text=text, conversation_id=s.conversation_id)
+        text, reasoning = [], []
+        for kind, chunk in s.events():
+            if kind == RESPONSE:
+                text.append(chunk)
+            elif kind == THINK:
+                reasoning.append(chunk)
+        return Reply(text="".join(text), conversation_id=s.conversation_id,
+                     reasoning="".join(reasoning))
 
     def close(self) -> None:
         self._http.close()
 
 
 class _Stream:
-    """Iterable of reply-text chunks. After it's consumed, `.conversation_id`
-    holds the token for resuming the conversation."""
+    """Iterable of reply-text chunks (DeepThink reasoning excluded; use
+    `.events()` to get it too). After it's consumed, `.conversation_id` holds
+    the token for resuming the conversation."""
 
     def __init__(self, client: "DeepSeekClient", prompt: str, session_id: str,
                  parent_id: Optional[int], model: str,
@@ -203,6 +255,13 @@ class _Stream:
         self._message_id: Optional[int] = None
 
     def __iter__(self) -> Iterator[str]:
+        for kind, text in self.events():
+            if kind == RESPONSE:
+                yield text
+
+    def events(self) -> Iterator[tuple[str, str]]:
+        """Yield `(fragment_type, text)` pairs: THINK for DeepThink reasoning,
+        RESPONSE for the reply, plus any other fragment types DeepSeek sends."""
         body = {
             "chat_session_id": self._session_id,
             "parent_message_id": self._parent_id,
@@ -232,21 +291,54 @@ class _Stream:
         return _encode_cid(self._session_id, self._message_id)
 
 
-def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
-    """Turn DeepSeek's SSE completion stream into reply-text deltas.
+def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[tuple[str, str]]:
+    """Turn DeepSeek's SSE completion stream into `(fragment_type, text)` deltas.
 
     The stream sends an initial snapshot frame whose `v` is the full response
-    object (with `fragments[].content`), then a series of append frames:
+    object (with `fragments[]`), then a series of patch frames:
+      * {"p":"response/fragments","o":"APPEND","v":[{"type":"THINK","content":"Ok"}]}
+                                                    (starts a new fragment)
       * {"p":"response/fragments/-1/content","o":"APPEND","v":" what"}  (sets path)
       * {"v":"'s"}                                                       (appends to it)
-    We track the active append path and emit only RESPONSE-fragment text.
+      * {"p":"response","o":"BATCH","v":[{"p":"fragments",...}, ...]}    (several at once)
+    We keep the list of fragment types so each text delta can be labelled THINK
+    (DeepThink reasoning), RESPONSE (the reply) or whatever else DeepSeek sends.
 
     If `meta` is given, the assistant's `message_id` is recorded into it (used to
     build the resumable conversation_id). The exact field location can vary, so
     we look in a few plausible spots defensively.
     """
+    frag_types: list = []
     active_path: Optional[str] = None
-    emitted_initial = False
+
+    def add_fragments(frags) -> Iterator[tuple[str, str]]:
+        for frag in frags or []:
+            if not isinstance(frag, dict):
+                continue
+            kind = frag.get("type") or RESPONSE
+            frag_types.append(kind)
+            if isinstance(frag.get("content"), str) and frag["content"]:
+                yield kind, frag["content"]
+
+    def type_at(path: str) -> str:
+        # "response/fragments/<index>/content" -> that fragment's type. Before
+        # any fragment is known, treat text as reply text.
+        try:
+            return frag_types[int(path.split("/")[-2])]
+        except (ValueError, IndexError):
+            return frag_types[-1] if frag_types else RESPONSE
+
+    def apply(path: str, op: Optional[str], v) -> Iterator[tuple[str, str]]:
+        if op == "BATCH" and isinstance(v, list):
+            for sub in v:
+                if isinstance(sub, dict) and "p" in sub:
+                    yield from apply(f"{path}/{sub['p']}", sub.get("o"), sub.get("v"))
+        elif path.endswith("fragments") and isinstance(v, list):
+            yield from add_fragments(v)
+        elif path.endswith("/content") and isinstance(v, str) and op in (None, "APPEND"):
+            yield type_at(path), v
+        elif path.endswith("message_id") and isinstance(v, int) and meta is not None:
+            meta["message_id"] = v
 
     for line in lines:
         if not line or not line.startswith("data:"):
@@ -265,28 +357,19 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         if isinstance(v, dict) and "response" in v:
             if meta is not None:
                 _capture_message_id(meta, v)
-            for frag in v["response"].get("fragments", []):
-                if frag.get("type") == "RESPONSE" and frag.get("content"):
-                    active_path = "response/fragments/-1/content"
-                    if not emitted_initial:
-                        emitted_initial = True
-                        yield frag["content"]
+            yield from add_fragments(v["response"].get("fragments"))
+            active_path = "response/fragments/-1/content"
             continue
 
-        # Path-setting append frame.
+        # Path-setting patch frame.
         if "p" in obj:
             active_path = obj["p"]
-            if meta is not None and active_path.endswith("message_id") \
-                    and isinstance(v, int):
-                meta["message_id"] = v
-            if obj.get("o") == "APPEND" and isinstance(v, str) \
-                    and active_path.endswith("content"):
-                yield v
+            yield from apply(active_path, obj.get("o"), v)
             continue
 
         # Bare append to the current path.
-        if isinstance(v, str) and active_path and active_path.endswith("content"):
-            yield v
+        if active_path:
+            yield from apply(active_path, None, v)
 
 
 def _capture_message_id(meta: dict, snapshot: dict) -> None:

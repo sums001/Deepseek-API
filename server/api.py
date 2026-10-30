@@ -24,7 +24,6 @@ from __future__ import annotations
 import threading
 import time
 
-from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
@@ -36,17 +35,25 @@ from .config import (
     MODEL_MAP,
     RATE_LIMIT_PER_MINUTE,
     SERVER_INTERACTIVE_LOGIN,
+    TRUST_PROXY_HEADERS,
     is_known_model,
     resolve_model_type,
 )
-from .openai_format import completion_response, messages_to_prompt, stream_chunks
+from .openai_format import (
+    completion_response,
+    messages_to_prompt,
+    stream_chunks,
+    stream_error,
+)
 from .ratelimit import RateLimiter, install_rate_limit
 from .schemas import ChatCompletionRequest
 
-load_dotenv()
-
 app = FastAPI(title="DeepSeek OpenAI-compatible API", version="0.1.0")
-install_rate_limit(app, RateLimiter(limit=RATE_LIMIT_PER_MINUTE, window=60.0))
+install_rate_limit(
+    app,
+    RateLimiter(limit=RATE_LIMIT_PER_MINUTE, window=60.0),
+    trust_forwarded=TRUST_PROXY_HEADERS,
+)
 
 # One shared client (and its signed-in session) built lazily on first use.
 _client: DeepSeekClient | None = None
@@ -124,12 +131,26 @@ async def chat_completions(req: ChatCompletionRequest):
         return _error(f"Failed to initialise DeepSeek session: {e}")
 
     if req.stream:
-        def gen():
-            stream = client.stream(
-                prompt, conversation_id=req.conversation_id,
-                model=model_type, thinking=req.thinking, search=req.search,
+        # Open the thread before responding, so failures here (bad session,
+        # DeepSeek errors) still get a real HTTP status instead of a 200 stream.
+        try:
+            stream = await run_in_threadpool(
+                client.stream, prompt, req.conversation_id,
+                model_type, req.thinking, req.search,
             )
-            yield from stream_chunks(req.model, stream)
+        except LoginRequired as e:
+            return _error(str(e), status=503, err_type="login_required")
+        except Exception as e:
+            return _error(f"DeepSeek request failed: {e}")
+
+        def gen():
+            # Headers are already sent by now, so report a mid-stream failure
+            # as an error frame (the OpenAI SDK raises on it) rather than
+            # silently dropping the connection.
+            try:
+                yield from stream_chunks(req.model, stream)
+            except Exception as e:
+                yield from stream_error(f"DeepSeek request failed: {e}")
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -138,7 +159,10 @@ async def chat_completions(req: ChatCompletionRequest):
             client.chat, prompt, req.conversation_id,
             model_type, req.thinking, req.search,
         )
+    except LoginRequired as e:
+        return _error(str(e), status=503, err_type="login_required")
     except Exception as e:
         return _error(f"DeepSeek request failed: {e}")
 
-    return completion_response(req.model, reply.text, prompt, reply.conversation_id)
+    return completion_response(req.model, reply.text, prompt, reply.conversation_id,
+                               reply.reasoning)

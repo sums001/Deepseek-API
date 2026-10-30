@@ -12,6 +12,8 @@ import time
 import uuid
 from typing import Iterable, List
 
+from deepseek.client import RESPONSE, THINK
+
 from .schemas import ChatMessage
 
 _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant"}
@@ -62,13 +64,17 @@ def _est_tokens(text: str) -> int:
 
 
 def completion_response(model: str, content: str, prompt: str,
-                        conversation_id: str = None) -> dict:
+                        conversation_id: str = None, reasoning: str = "") -> dict:
     """A full (non-streaming) OpenAI chat.completion object.
 
     `conversation_id` is an extra top-level field (outside OpenAI's schema) you
-    send back to resume the conversation.
+    send back to resume the conversation. DeepThink text, if any, goes in
+    `message.reasoning_content` (DeepSeek's official API uses the same field).
     """
-    pt, ct = _est_tokens(prompt), _est_tokens(content)
+    pt, ct = _est_tokens(prompt), _est_tokens(reasoning + content)
+    message = {"role": "assistant", "content": content}
+    if reasoning:
+        message["reasoning_content"] = reasoning
     return {
         "id": _id(),
         "object": "chat.completion",
@@ -78,7 +84,7 @@ def completion_response(model: str, content: str, prompt: str,
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": message,
                 "finish_reason": "stop",
             }
         ],
@@ -90,11 +96,12 @@ def completion_response(model: str, content: str, prompt: str,
     }
 
 
-def stream_chunks(model: str, stream: Iterable[str]) -> Iterable[str]:
+def stream_chunks(model: str, stream) -> Iterable[str]:
     """Yield OpenAI SSE lines (`data: {...}\\n\\n`) for a streamed completion.
 
-    `stream` is the client's stream object; after it's consumed we read its
-    `.conversation_id` and attach it to the final chunk.
+    `stream` is the client's stream object. Reply text goes out as `content`
+    deltas and DeepThink text as `reasoning_content` deltas; after it's consumed
+    we read its `.conversation_id` and attach it to the final chunk.
     """
     cid, created = _id(), _now()
 
@@ -112,9 +119,20 @@ def stream_chunks(model: str, stream: Iterable[str]) -> Iterable[str]:
 
     # First frame announces the assistant role.
     yield frame({"role": "assistant", "content": ""})
-    for d in stream:
-        if d:
+    for kind, d in stream.events():
+        if not d:
+            continue
+        if kind == RESPONSE:
             yield frame({"content": d})
+        elif kind == THINK:
+            yield frame({"reasoning_content": d})
     conversation_id = getattr(stream, "conversation_id", None)
     yield frame({}, finish="stop", extra={"conversation_id": conversation_id})
+    yield "data: [DONE]\n\n"
+
+
+def stream_error(message: str, err_type: str = "server_error") -> Iterable[str]:
+    """SSE lines reporting a failure after the stream has started."""
+    err = {"error": {"message": message, "type": err_type}}
+    yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"

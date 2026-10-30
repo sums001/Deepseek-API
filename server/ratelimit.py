@@ -29,6 +29,7 @@ class RateLimiter:
         self.window = window
         self._hits: Dict[str, Deque[float]] = defaultdict(deque)
         self._lock = threading.Lock()
+        self._last_sweep = 0.0
 
     def hit(self, key: str, now: float) -> Tuple[bool, int, float]:
         """Record a request for `key`. Returns (allowed, remaining, retry_after).
@@ -38,6 +39,13 @@ class RateLimiter:
         """
         cutoff = now - self.window
         with self._lock:
+            # Once per window, forget clients with no hits left in it, so the
+            # table doesn't grow with every IP ever seen.
+            if now - self._last_sweep >= self.window:
+                for k in [k for k, hq in self._hits.items() if not hq or hq[-1] <= cutoff]:
+                    del self._hits[k]
+                self._last_sweep = now
+
             q = self._hits[key]
             while q and q[0] <= cutoff:
                 q.popleft()
@@ -50,12 +58,14 @@ class RateLimiter:
             return True, self.limit - len(q), 0.0
 
 
-def install_rate_limit(app, limiter: RateLimiter, *, protect_prefix: str = "/v1") -> None:
+def install_rate_limit(app, limiter: RateLimiter, *, protect_prefix: str = "/v1",
+                       trust_forwarded: bool = False) -> None:
     """Attach `limiter` to a FastAPI/Starlette app as HTTP middleware.
 
     Only paths under `protect_prefix` are limited (so /healthz stays open). On
     every response we set the standard `X-RateLimit-*` headers; over-limit
     requests get a 429 with `Retry-After` and an OpenAI-shaped error body.
+    `trust_forwarded` keys clients on X-Forwarded-For (only safe behind a proxy).
     """
 
     @app.middleware("http")
@@ -63,7 +73,7 @@ def install_rate_limit(app, limiter: RateLimiter, *, protect_prefix: str = "/v1"
         if not request.url.path.startswith(protect_prefix):
             return await call_next(request)
 
-        key = _client_key(request)
+        key = _client_key(request, trust_forwarded)
         now = time.time()
         allowed, remaining, retry_after = limiter.hit(key, now)
 
@@ -91,9 +101,10 @@ def install_rate_limit(app, limiter: RateLimiter, *, protect_prefix: str = "/v1"
         return resp
 
 
-def _client_key(request: Request) -> str:
-    """Best-effort client identity: first X-Forwarded-For hop, else peer IP."""
-    fwd = request.headers.get("x-forwarded-for")
+def _client_key(request: Request, trust_forwarded: bool = False) -> str:
+    """Best-effort client identity: the peer IP, or the first X-Forwarded-For
+    hop when `trust_forwarded` is on (the header is client-controlled otherwise)."""
+    fwd = request.headers.get("x-forwarded-for") if trust_forwarded else None
     if fwd:
         return fwd.split(",")[0].strip()
     return request.client.host if request.client else "unknown"

@@ -241,6 +241,7 @@ it caps accepted requests **per client IP** and returns a standard `429` +
 | Env var | Default | Meaning |
 | --- | --- | --- |
 | `RATE_LIMIT_PER_MINUTE` | `30` | Requests/minute accepted per client IP |
+| `TRUST_PROXY_HEADERS` | `0` | Set to `1` behind a reverse proxy to identify clients by `X-Forwarded-For`. Leave off otherwise: callers could fake the header to dodge the limit |
 
 ```bash
 RATE_LIMIT_PER_MINUTE=60 python app.py   # raise it
